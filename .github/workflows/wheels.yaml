@@ -1,9 +1,20 @@
 name: Build Rust-Python wheels (abi3, CPython 3.7+)
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+      release_title:
+        description: 'Release title (optional, will use version if not provided)'
+        required: false
+        type: string
+      release_body:
+        description: 'Release description (optional)'
+        required: false
+        type: string
 
 env:
   PROJECT_DIR: bindings/python
@@ -59,6 +70,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       # Set up CPython (Windows requires explicit architecture)
       - name: Setup Python (Windows)
@@ -83,8 +96,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install -U pip
-          python -m pip install -r "${PROJECT_DIR}/requirements.txt" || true
-          python -m pip install maturin
+          python -m pip install -r "${PROJECT_DIR}/requirements.txt"
 
       # Build (abi3). universal2 needs explicit target; Windows needs MSVC target.
       - name: Build (maturin)
@@ -102,7 +114,7 @@ jobs:
           fi
           ls -lah "$WHEELS_DIR"
 
-      # Rename to <windows|macos>-cp37-abi3-<x86|x86_64|arm64|universal>.whl
+      # Rename to <windows|macos>-abi37-<x86|x86_64|arm64|universal>.whl
       # Also assert the wheel is cp37-abi3 to ensure the Cargo.toml feature is correct.
       - name: Rename artifact (assert cp37-abi3)
         shell: bash
@@ -118,7 +130,7 @@ jobs:
               raise SystemExit(f"Wheel must be cp37-abi3, got: {base}. Did you enable 'abi3-py37'?")
           label=os.environ.get("LABEL")
           arch=os.environ.get("ARCH")
-          new=f"{label}-cp37-abi3-{arch}.whl"
+          new=f"{label}-abi37-{arch}.whl"
           shutil.copy2(w, new)
           print("RENAMED:", base, "->", new)
           PY
@@ -138,7 +150,6 @@ jobs:
     name: Publish wheels to target repo and cleanup artifacts
     needs: [build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     concurrency:
       group: release-${{ github.ref }}
       cancel-in-progress: false
@@ -171,9 +182,18 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           repository: ${{ env.TARGET_REPO }}
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ github.event.inputs.version }}
           target_commitish: ${{ env.TARGET_COMMITISH }}
-          name: ${{ github.ref_name }}
+          name: ${{ github.event.inputs.release_title || github.event.inputs.version }}
+          body: |
+            ${{ github.event.inputs.release_body || format('Release {0}', github.event.inputs.version) }}
+            
+            ## Wheels
+            This release includes compiled wheels for multiple platforms:
+            - Windows (x86, x64, ARM64)
+            - macOS (Intel, Apple Silicon, Universal)
+            
+            Built with Python 3.7+ abi3 compatibility.
           files: all_wheels/*.whl
         env:
           # GitHub App token (short-lived, ~1h)
