@@ -1,0 +1,8 @@
+[submodule "core"]
+	path = core
+	url = https://github.com/ridi-re/ridicrypt-core.git
+	branch = main
+[submodule "bindings/python"]
+	path = bindings/python
+	url = https://github.com/ridi-re/ridicrypt-py.git
+	branch = main

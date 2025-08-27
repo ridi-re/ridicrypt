@@ -1,0 +1,192 @@
+name: Build Rust-Python wheels (abi3, CPython 3.7+)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  PROJECT_DIR: bindings/python
+  WHEELS_DIR: ${{ github.workspace }}/target/wheels
+
+jobs:
+  build:
+    name: ${{ matrix.label }} ${{ matrix.arch }} abi3 (py${{ matrix.py }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows 32-bit
+          - target: win32
+            runner: windows-2022
+            label: windows
+            arch: x86
+            rust_target: i686-pc-windows-msvc
+            py: "3.13"
+          # Windows 64-bit
+          - target: win_amd64
+            runner: windows-2022
+            label: windows
+            arch: x86_64
+            rust_target: x86_64-pc-windows-msvc
+            py: "3.13"
+          # Windows ARM64
+          - target: win_arm64
+            runner: windows-11-arm
+            label: windows
+            arch: arm64
+            rust_target: aarch64-pc-windows-msvc
+            py: "3.13"
+          # macOS Intel
+          - target: mac_x86_64
+            runner: macos-13
+            label: macos
+            arch: x86_64
+            py: "3.13"
+          # macOS Apple Silicon
+          - target: mac_arm64
+            runner: macos-14
+            label: macos
+            arch: arm64
+            py: "3.13"
+          # macOS universal2 (fat: x86_64 + arm64)
+          - target: mac_universal2
+            runner: macos-14
+            label: macos
+            arch: universal
+            py: "3.13"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Set up CPython (Windows requires explicit architecture)
+      - name: Setup Python (Windows)
+        if: startsWith(matrix.target, 'win')
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
+          architecture: ${{ matrix.arch == 'x86' && 'x86' || matrix.arch == 'x86_64' && 'x64' || matrix.arch == 'arm64' && 'arm64' || 'x64' }}
+
+      - name: Setup Python (macOS)
+        if: startsWith(matrix.target, 'mac')
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
+
+      # Rust toolchain (targets will be added in the build step)
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Install Python deps and maturin
+      - name: Install deps
+        shell: bash
+        run: |
+          python -m pip install -U pip
+          python -m pip install -r "${PROJECT_DIR}/requirements.txt" || true
+          python -m pip install maturin
+
+      # Build (abi3). universal2 needs explicit target; Windows needs MSVC target.
+      - name: Build (maturin)
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          if [[ "${{ matrix.target }}" == "mac_universal2" ]]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+            maturin build --release --target universal2-apple-darwin -i python
+          elif [[ "${{ matrix.target }}" == "win32" || "${{ matrix.target }}" == "win_amd64" || "${{ matrix.target }}" == "win_arm64" ]]; then
+            rustup target add "${{ matrix.rust_target }}"
+            maturin build --release --target "${{ matrix.rust_target }}" -i python
+          else
+            maturin build --release -i python
+          fi
+          ls -lah "$WHEELS_DIR"
+
+      # Rename to <windows|macos>-cp37-abi3-<x86|x86_64|arm64|universal>.whl
+      # Also assert the wheel is cp37-abi3 to ensure the Cargo.toml feature is correct.
+      - name: Rename artifact (assert cp37-abi3)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, re, glob, shutil, sys
+          d=os.environ["WHEELS_DIR"]
+          ws=sorted(glob.glob(os.path.join(d,"*.whl")), key=os.path.getmtime)
+          if not ws:
+              sys.exit("No wheels found")
+          w=ws[-1]; base=os.path.basename(w)
+          if "-cp37-abi3" not in base:
+              raise SystemExit(f"Wheel must be cp37-abi3, got: {base}. Did you enable 'abi3-py37'?")
+          label=os.environ.get("LABEL")
+          arch=os.environ.get("ARCH")
+          new=f"{label}-cp37-abi3-{arch}.whl"
+          shutil.copy2(w, new)
+          print("RENAMED:", base, "->", new)
+          PY
+        env:
+          LABEL: ${{ matrix.label }}
+          ARCH:  ${{ matrix.arch }}
+
+      - name: Upload artifact (1 day retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}-${{ matrix.arch }}-abi3
+          path: ./*.whl
+          retention-days: 1
+
+  # Publish to another repo via GitHub App, then delete artifacts
+  release:
+    name: Publish wheels to target repo and cleanup artifacts
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
+    env:
+      TARGET_REPO: ridi-re/ridicrypt-py
+      TARGET_COMMITISH: main
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all_wheels
+        # Flatten all artifacts into a single folder
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -lah all_wheels
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ridi-re
+          repositories: ridicrypt-py
+
+      - name: Create GitHub Release in target repo
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ env.TARGET_COMMITISH }}
+          name: ${{ github.ref_name }}
+          files: all_wheels/*.whl
+        env:
+          # GitHub App token (short-lived, ~1h)
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Delete all artifacts of this run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run_id = context.runId;
+            const { owner, repo } = context.repo;
+            const res = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts', { owner, repo, run_id });
+            for (const a of res.data.artifacts || []) {
+              await github.request('DELETE /repos/{owner}/{repo}/actions/artifacts/{artifact_id}', { owner, repo, artifact_id: a.id });
+              core.info(`Deleted artifact: ${a.name} (${a.id})`);
+            }
