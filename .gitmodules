@@ -6,3 +6,7 @@
 	path = bindings/python
 	url = https://github.com/ridi-re/ridicrypt-py.git
 	branch = main
+[submodule "gui"]
+	path = gui
+	url = https://github.com/ridi-re/ridicrypt-gui.git
+	branch = main

@@ -1,0 +1,200 @@
+name: Build GUI Applications (Tauri)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+      release_title:
+        description: 'Release title (optional, will use version if not provided)'
+        required: false
+        type: string
+      release_body:
+        description: 'Release description (optional)'
+        required: false
+        type: string
+
+env:
+  PROJECT_DIR: gui
+
+jobs:
+  build:
+    name: ${{ matrix.label }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows x64
+          - target: windows-x86_64
+            runner: windows-2022
+            label: windows
+            arch: x86_64
+            rust_target: x86_64-pc-windows-msvc
+            tauri_target: x86_64-pc-windows-msvc
+          # Windows ARM64
+          - target: windows-arm64
+            runner: windows-11-arm
+            label: windows
+            arch: arm64
+            rust_target: aarch64-pc-windows-msvc
+            tauri_target: aarch64-pc-windows-msvc
+          # macOS Universal (Intel + Apple Silicon)
+          - target: macos-universal
+            runner: macos-14
+            label: macos
+            arch: universal
+            rust_target: universal-apple-darwin
+            tauri_target: universal-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Setup Node.js for frontend build
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Setup pnpm
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      # Setup Rust
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Add Rust targets
+      - name: Add Rust targets
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == "macos-universal" ]]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          else
+            rustup target add ${{ matrix.rust_target }}
+          fi
+
+      # Install frontend dependencies
+      - name: Install dependencies
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          pnpm install --frozen-lockfile
+
+      # Build Tauri app
+      - name: Build Tauri app
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          pnpm tauri build --target ${{ matrix.tauri_target }}
+
+      # Collect artifacts
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          BUNDLE_DIR="${{ github.workspace }}/target/${{ matrix.rust_target }}/release/bundle"
+          mkdir -p "${{ github.workspace }}/artifacts"
+          
+          if [[ "${{ matrix.label }}" == "windows" ]]; then
+            # Windows: MSI and NSIS installers
+            if [ -d "$BUNDLE_DIR/msi" ]; then
+              cp "$BUNDLE_DIR/msi"/*.msi "${{ github.workspace }}/artifacts/" || true
+            fi
+            if [ -d "$BUNDLE_DIR/nsis" ]; then
+              cp "$BUNDLE_DIR/nsis"/*.exe "${{ github.workspace }}/artifacts/" || true
+            fi
+          elif [[ "${{ matrix.label }}" == "macos" ]]; then
+            # macOS: DMG and app bundle
+            if [ -d "$BUNDLE_DIR/dmg" ]; then
+              cp "$BUNDLE_DIR/dmg"/*.dmg "${{ github.workspace }}/artifacts/" || true
+            fi
+            if [ -d "$BUNDLE_DIR/macos" ]; then
+              cd "$BUNDLE_DIR/macos"
+              tar -czf "${{ github.workspace }}/artifacts/ridicrypt-gui-${{ matrix.arch }}.app.tar.gz" *.app || true
+            fi
+          fi
+          
+          ls -lah "${{ github.workspace }}/artifacts"
+
+      # Upload artifacts
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}-${{ matrix.arch }}
+          path: ${{ github.workspace }}/artifacts/*
+          retention-days: 1
+
+  # Publish to target repo via GitHub App
+  release:
+    name: Publish to target repo and cleanup artifacts
+    needs: [build]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
+    env:
+      TARGET_REPO: ridi-re/ridicrypt-gui
+      TARGET_COMMITISH: main
+    steps:
+      # Download all artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          path: all_artifacts
+          merge-multiple: true
+
+      # List artifacts
+      - name: List artifacts
+        run: ls -lah all_artifacts
+
+      # Generate GitHub App token
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ridi-re
+          repositories: ridicrypt-gui
+
+      # Create GitHub Release in target repo
+      - name: Create GitHub Release in target repo
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          tag_name: ${{ github.event.inputs.version }}
+          target_commitish: ${{ env.TARGET_COMMITISH }}
+          name: ${{ github.event.inputs.release_title || github.event.inputs.version }}
+          body: |
+            ${{ github.event.inputs.release_body || format('Release {0}', github.event.inputs.version) }}
+            
+            ## Installers
+            This release includes compiled installers for:
+            - Windows (x64, ARM64): MSI and NSIS installers
+            - macOS (Universal): DMG and app bundle
+            
+            Built with Tauri v2 for optimal performance and security.
+          files: all_artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # Delete all artifacts
+      - name: Delete all artifacts of this run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run_id = context.runId;
+            const { owner, repo } = context.repo;
+            const res = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts', { owner, repo, run_id });
+            for (const a of res.data.artifacts || []) {
+              await github.request('DELETE /repos/{owner}/{repo}/actions/artifacts/{artifact_id}', { owner, repo, artifact_id: a.id });
+              core.info(`Deleted artifact: ${a.name} (${a.id})`);
+            }
