@@ -104,19 +104,34 @@ jobs:
           if [[ "${{ matrix.label }}" == "windows" ]]; then
             # Windows: MSI and NSIS installers
             if [ -d "$BUNDLE_DIR/msi" ]; then
-              cp "$BUNDLE_DIR/msi"/*.msi "${{ github.workspace }}/artifacts/" || true
+              for file in "$BUNDLE_DIR/msi"/*.msi; do
+                if [ -f "$file" ]; then
+                  basename=$(basename "$file" .msi)
+                  cp "$file" "${{ github.workspace }}/artifacts/${basename}-${{ matrix.label }}-${{ matrix.arch }}.msi"
+                fi
+              done
             fi
             if [ -d "$BUNDLE_DIR/nsis" ]; then
-              cp "$BUNDLE_DIR/nsis"/*.exe "${{ github.workspace }}/artifacts/" || true
+              for file in "$BUNDLE_DIR/nsis"/*.exe; do
+                if [ -f "$file" ]; then
+                  basename=$(basename "$file" .exe)
+                  cp "$file" "${{ github.workspace }}/artifacts/${basename}-${{ matrix.label }}-${{ matrix.arch }}.exe"
+                fi
+              done
             fi
           elif [[ "${{ matrix.label }}" == "macos" ]]; then
             # macOS: DMG and app bundle
             if [ -d "$BUNDLE_DIR/dmg" ]; then
-              cp "$BUNDLE_DIR/dmg"/*.dmg "${{ github.workspace }}/artifacts/" || true
+              for file in "$BUNDLE_DIR/dmg"/*.dmg; do
+                if [ -f "$file" ]; then
+                  basename=$(basename "$file" .dmg)
+                  cp "$file" "${{ github.workspace }}/artifacts/${basename}-${{ matrix.label }}-${{ matrix.arch }}.dmg"
+                fi
+              done
             fi
             if [ -d "$BUNDLE_DIR/macos" ]; then
               cd "$BUNDLE_DIR/macos"
-              tar -czf "${{ github.workspace }}/artifacts/ridicrypt-gui-${{ matrix.arch }}.app.tar.gz" *.app || true
+              tar -czf "${{ github.workspace }}/artifacts/ridicrypt-gui-${{ matrix.label }}-${{ matrix.arch }}.app.tar.gz" *.app || true
             fi
           fi
           
